@@ -72,34 +72,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - name: Install Trivy
-        env:
-          TRIVY_VERSION: "0.65.0"
-        run: |
-          set -euo pipefail
-
-          curl --fail --silent --show-error --location \
-            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-            -o /tmp/trivy.tar.gz
-
-          curl --fail --silent --show-error --location \
-            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_checksums.txt" \
-            -o /tmp/trivy_checksums.txt
-
-          cd /tmp
-
-          grep "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" trivy_checksums.txt \
-            | sha256sum -c -
-
-          tar -xzf trivy.tar.gz
-
-          sudo install -m 0755 trivy /usr/local/bin/trivy
-
-          trivy --version
-
       - name: Trivy filesystem scan
         run: |
-          trivy fs \
+          docker run --rm \
+            -v "$PWD:/workdir" \
+            -w /workdir \
+            aquasec/trivy:0.65.0 \
+            fs \
             --severity CRITICAL,HIGH \
             --ignore-unfixed \
             --exit-code 1 \
