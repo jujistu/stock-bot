@@ -64,24 +64,24 @@ jobs:
         with:
           args: "./..."
 
-    trivy:
-      name: Filesystem Security Scan
-      runs-on: ubuntu-latest
+  trivy:
+    name: Filesystem Security Scan
+    runs-on: ubuntu-latest
 
-      steps:
-        - name: Checkout
-          uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-        - name: Setup Trivy
-          uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
-          with:
-            version: v0.65.0
+      - name: Setup Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.65.0
 
-        - name: Trivy filesystem scan
-          uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-          with:
-            scan-type: fs
-            scan-ref: .
-            severity: CRITICAL,HIGH
-            ignore-unfixed: true
-            exit-code: "1"
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
