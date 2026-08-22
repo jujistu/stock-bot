@@ -10,33 +10,24 @@ import (
 	"strings"
 )
 
-type AlphaVantageResponse struct {
+type alphaVantageResponse struct {
 	GlobalQuote struct {
 		Symbol        string `json:"01. symbol"`
-		Open          string `json:"02. open"`
-		High          string `json:"03. high"`
-		Low           string `json:"04. low"`
 		Price         string `json:"05. price"`
-		Volume        string `json:"06. volume"`
 		LatestTrading string `json:"07. latest trading day"`
-		PreviousClose string `json:"08. previous close"`
-		Change        string `json:"09. change"`
-		ChangePercent string `json:"10. change percent"`
 	} `json:"Global Quote"`
 }
 
-type AlphaVantageErrorResponse struct {
-	Information string `json:"Information"`
-	Note        string `json:"Note"`
-	Error       string `json:"Error Message"`
-}
-
 func EvalStock(key string) string {
-	symbol := strings.TrimSpace(key)
+	symbol := strings.TrimSpace(strings.ToUpper(key))
 
 	if symbol == "" {
 		return "Stock symbol is required"
 	}
+
+	// Accept the existing command format, e.g. aapl.us,
+	// while Alpha Vantage expects AAPL.
+	symbol = strings.TrimSuffix(symbol, ".US")
 
 	apiKey := os.Getenv("STOCK_API_KEY")
 	if apiKey == "" {
@@ -44,21 +35,23 @@ func EvalStock(key string) string {
 		return "Stock service is not configured"
 	}
 
-	// The old application accepted symbols such as aapl.us.
-	// Alpha Vantage uses AAPL for US equities.
-	symbol = strings.TrimSuffix(strings.ToUpper(symbol), ".US")
+	params := url.Values{}
+	params.Set("function", "GLOBAL_QUOTE")
+	params.Set("symbol", symbol)
+	params.Set("apikey", apiKey)
 
-	stockServiceURL := fmt.Sprintf(
-		"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=%s&apikey=%s",
-		url.QueryEscape(symbol),
-		url.QueryEscape(apiKey),
-	)
+	stockServiceURL := "https://www.alphavantage.co/query?" + params.Encode()
 
-	log.Println("info: processing", stockServiceURL)
-
-	response, err := http.Get(stockServiceURL)
+	req, err := http.NewRequest(http.MethodGet, stockServiceURL, nil)
 	if err != nil {
-		log.Println("error:", err)
+		log.Println("error creating stock request:", err)
+		return "Stock service request error"
+	}
+
+	client := &http.Client{}
+	response, err := client.Do(req)
+	if err != nil {
+		log.Println("error requesting stock service:", err)
 		return "Stock service is not available"
 	}
 	defer response.Body.Close()
@@ -68,27 +61,21 @@ func EvalStock(key string) string {
 		return "Stock service is not available"
 	}
 
-	var result AlphaVantageResponse
+	var data alphaVantageResponse
 
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(response.Body).Decode(&data); err != nil {
 		log.Println("error decoding stock response:", err)
 		return "Stock service response error"
 	}
 
-	if result.GlobalQuote.Symbol == "" {
-		log.Println("error: no quote returned for", symbol)
-		return fmt.Sprintf("%s quote is not available", symbol)
-	}
-
-	price := result.GlobalQuote.Price
-
-	if price == "" {
+	if data.GlobalQuote.Symbol == "" || data.GlobalQuote.Price == "" {
+		log.Println("error: stock quote unavailable for", symbol)
 		return fmt.Sprintf("%s quote is not available", symbol)
 	}
 
 	return fmt.Sprintf(
 		"%s quote is $%s per share",
-		strings.ToUpper(result.GlobalQuote.Symbol),
-		price,
+		strings.ToUpper(data.GlobalQuote.Symbol),
+		data.GlobalQuote.Price,
 	)
 }

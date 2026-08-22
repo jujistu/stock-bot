@@ -34,12 +34,12 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.19'
+          go-version: "1.23"
           cache: true
 
       - name: Install govulncheck
         run: |
-          GOTOOLCHAIN=local go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
       - name: Run govulncheck
         run: |
@@ -56,27 +56,32 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.19'
+          go-version: "1.19"
           cache: true
 
       - name: Run Gosec
         uses: securego/gosec@bfec35a303e24e2a929b586822eca8486accc670 # v2.22.10
         with:
-          args: './...'
+          args: "./..."
 
-  trivy:
-    name: Filesystem Security Scan
-    runs-on: ubuntu-latest
+    trivy:
+      name: Filesystem Security Scan
+      runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      steps:
+        - name: Checkout
+          uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: '1'
+        - name: Setup Trivy
+          uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+          with:
+            version: v0.65.0
+
+        - name: Trivy filesystem scan
+          uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
+          with:
+            scan-type: fs
+            scan-ref: .
+            severity: CRITICAL,HIGH
+            ignore-unfixed: true
+            exit-code: "1"
