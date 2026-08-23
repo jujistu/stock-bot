@@ -8,57 +8,321 @@ on:
 
 permissions:
     contents: read
+    packages: write
+
+concurrency:
+    group: stockbot-container-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+env:
+    IMAGE_NAME: go-stockbot
+    IMAGE_TAG: ${{ github.sha }}
+    TRIVY_VERSION: "0.74.0"
+    TRIVY_SHA256: "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a"
 
 jobs:
     container:
-        name: Build and Scan Container
+        name: Build, Scan, Harden & Publish
         runs-on: ubuntu-latest
+        timeout-minutes: 30
+
+        services:
+            rabbitmq:
+                image: rabbitmq:3.13-management
+                env:
+                    RABBITMQ_DEFAULT_USER: guest
+                    RABBITMQ_DEFAULT_PASS: guest
+                ports:
+                    - 5672:5672
+                options: >-
+                    --health-cmd "rabbitmq-diagnostics -q ping"
+                    --health-interval 10s
+                    --health-timeout 5s
+                    --health-retries 10
 
         steps:
+            # ----------------------------------------------------
+            # CHECKOUT
+            # ----------------------------------------------------
             - name: Checkout
               uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                  persist-credentials: false
 
+            # ----------------------------------------------------
+            # DOCKER BUILDX
+            # ----------------------------------------------------
             - name: Set up Docker Buildx
               uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+              with:
+                  install: true
 
+            # ----------------------------------------------------
+            # BUILD IMAGE
+            # ----------------------------------------------------
             - name: Build image
               uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
               with:
                   context: .
                   push: false
                   load: true
-                  tags: go-stockbot:${{ github.sha }}
+                  tags: |
+                      ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+                      ${{ env.IMAGE_NAME }}:ci
+                  provenance: false
 
+            # ----------------------------------------------------
+            # VERIFY IMAGE SECURITY CONFIGURATION
+            # ----------------------------------------------------
             - name: Verify container security
               run: |
-                  USER="$(docker image inspect go-stockbot:${{ github.sha }} --format '{{.Config.User}}')"
-                  ENTRYPOINT="$(docker image inspect go-stockbot:${{ github.sha }} --format '{{json .Config.Entrypoint}}')"
+                  set -euo pipefail
 
-                  echo "User: $USER"
-                  echo "Entrypoint: $ENTRYPOINT"
+                  USER="$(docker image inspect \
+                    "${IMAGE_NAME}:${IMAGE_TAG}" \
+                    --format '{{.Config.User}}')"
 
-                  test "$USER" = "appuser"
-                  test "$ENTRYPOINT" = '["/app/gostockbot"]'
+                  ENTRYPOINT="$(docker image inspect \
+                    "${IMAGE_NAME}:${IMAGE_TAG}" \
+                    --format '{{json .Config.Entrypoint}}')"
 
-            - name: Trivy image scan
-              uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-              with:
-                  image-ref: go-stockbot:${{ github.sha }}
-                  severity: CRITICAL,HIGH
-                  ignore-unfixed: true
-                  exit-code: "1"
-                  pkg-types: os,library
+                  echo "User: ${USER}"
+                  echo "Entrypoint: ${ENTRYPOINT}"
 
-            - name: Generate SBOM
-              uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
-              with:
-                  image: go-stockbot:${{ github.sha }}
-                  format: spdx-json
-                  output-file: sbom.spdx.json
+                  test "${USER}" = "appuser"
+                  test "${ENTRYPOINT}" = '["/app/gostockbot"]'
 
-            - name: Upload SBOM
+            # ----------------------------------------------------
+            # INSTALL PINNED TRIVY
+            # ----------------------------------------------------
+            - name: Install Trivy
+              run: |
+                  set -euo pipefail
+
+                  curl -fsSL \
+                    "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+                    -o /tmp/trivy.tar.gz
+
+                  echo "${TRIVY_SHA256}  /tmp/trivy.tar.gz" | sha256sum -c -
+
+                  tar -xzf /tmp/trivy.tar.gz -C /tmp
+
+                  sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
+
+                  trivy --version
+
+            # ----------------------------------------------------
+            # TRIVY SECURITY GATE
+            # ----------------------------------------------------
+            - name: Scan container image with Trivy
+              run: |
+                  set -euo pipefail
+
+                  trivy image \
+                    --scanners vuln,misconfig,secret \
+                    --severity HIGH,CRITICAL \
+                    --ignore-unfixed \
+                    --exit-code 1 \
+                    --format table \
+                    "${IMAGE_NAME}:${IMAGE_TAG}"
+
+            # ----------------------------------------------------
+            # GENERATE CYCLONEDX SBOM
+            # ----------------------------------------------------
+            - name: Generate CycloneDX SBOM
+              run: |
+                  set -euo pipefail
+
+                  trivy image \
+                    --scanners vuln \
+                    --format cyclonedx \
+                    --output sbom.cdx.json \
+                    "${IMAGE_NAME}:${IMAGE_TAG}"
+
+            # ----------------------------------------------------
+            # GENERATE TRIVY JSON REPORT
+            # ----------------------------------------------------
+            - name: Generate Trivy JSON report
+              run: |
+                  set -euo pipefail
+
+                  trivy image \
+                    --scanners vuln,misconfig,secret \
+                    --severity HIGH,CRITICAL \
+                    --ignore-unfixed \
+                    --format json \
+                    --output trivy-image-results.json \
+                    "${IMAGE_NAME}:${IMAGE_TAG}"
+
+            # ----------------------------------------------------
+            # VERIFY SECURITY ARTIFACTS
+            # ----------------------------------------------------
+            - name: Verify security artifacts
+              run: |
+                  set -euo pipefail
+
+                  echo "=== Security artifacts ==="
+
+                  test -s sbom.cdx.json
+                  test -s trivy-image-results.json
+
+                  ls -lh sbom.cdx.json
+                  ls -lh trivy-image-results.json
+
+            # ----------------------------------------------------
+            # HARDENED RUNTIME TEST
+            # ----------------------------------------------------
+            - name: Run hardened Stockbot
+              run: |
+                  set -euo pipefail
+
+                  docker run -d \
+                    --name go-stockbot-test \
+                    --network host \
+                    --read-only \
+                    --cap-drop ALL \
+                    --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+                    --tmpfs /run:rw,noexec,nosuid,size=4m \
+                    -e RMQ_USERNAME=guest \
+                    -e RMQ_PASSWORD=guest \
+                    -e RMQ_HOST=127.0.0.1 \
+                    -e RMQ_PORT=5672 \
+                    -e STKBT_RECEIVER_QUEUE=stockbot-receiver \
+                    -e STKBT_PUBLISHER_QUEUE=stockbot-publisher \
+                    -e STOCK_API_KEY="${STOCK_API_KEY:-ci-test-key}" \
+                    "${IMAGE_NAME}:${IMAGE_TAG}"
+
+                  echo "Container started:"
+                  docker ps -a
+
+            # ----------------------------------------------------
+            # WAIT FOR STOCKBOT
+            # ----------------------------------------------------
+            - name: Verify Stockbot runtime
+              run: |
+                  set -euo pipefail
+
+                  for i in {1..30}; do
+                    echo "Attempt ${i}/30"
+
+                    if docker inspect go-stockbot-test \
+                        --format '{{.State.Running}}' | grep -q true; then
+
+                      echo "Stockbot is running."
+
+                      docker logs go-stockbot-test
+
+                      if docker logs go-stockbot-test 2>&1 | grep -q "Waiting for messages"; then
+                        echo "Stockbot reached RabbitMQ consumer state."
+                        exit 0
+                      fi
+
+                    else
+                      echo "Stockbot is not running."
+
+                      docker logs go-stockbot-test || true
+                      exit 1
+                    fi
+
+                    sleep 2
+                  done
+
+                  echo "Stockbot failed to reach expected runtime state."
+
+                  docker logs go-stockbot-test
+
+                  exit 1
+
+            # ----------------------------------------------------
+            # VERIFY HARDENED RUNTIME CONFIGURATION
+            # ----------------------------------------------------
+            - name: Verify hardened container
+              run: |
+                  set -euo pipefail
+
+                  USER="$(docker inspect go-stockbot-test \
+                    --format '{{.Config.User}}')"
+
+                  READONLY="$(docker inspect go-stockbot-test \
+                    --format '{{.HostConfig.ReadonlyRootfs}}')"
+
+                  CAPDROP="$(docker inspect go-stockbot-test \
+                    --format '{{json .HostConfig.CapDrop}}')"
+
+                  echo "User: ${USER}"
+                  echo "Readonly: ${READONLY}"
+                  echo "CapDrop: ${CAPDROP}"
+
+                  test "${USER}" = "appuser"
+                  test "${READONLY}" = "true"
+                  echo "${CAPDROP}" | grep -q 'ALL'
+
+            # ----------------------------------------------------
+            # SECURITY SUMMARY
+            # ----------------------------------------------------
+            - name: Publish security summary
+              if: always()
+              run: |
+                  {
+                    echo "## Stockbot Container Security"
+                    echo
+                    echo "- Image: \`${IMAGE_NAME}:${IMAGE_TAG}\`"
+                    echo "- Trivy: ${TRIVY_VERSION}"
+                    echo "- Severity gate: HIGH, CRITICAL"
+                    echo "- Unfixed vulnerabilities: ignored"
+                    echo "- SBOM: CycloneDX"
+                    echo "- Runtime: non-root"
+                    echo "- Read-only filesystem: enabled"
+                    echo "- Capabilities: ALL dropped"
+                    echo "- RabbitMQ runtime validation: enabled"
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+            # ----------------------------------------------------
+            # UPLOAD SECURITY ARTIFACTS
+            # ----------------------------------------------------
+            - name: Upload SBOM and Trivy report
               uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
               with:
-                  name: stockbot-sbom-${{ github.sha }}
-                  path: sbom.spdx.json
+                  name: stockbot-container-security-${{ github.sha }}
+                  path: |
+                      sbom.cdx.json
+                      trivy-image-results.json
                   if-no-files-found: error
+                  retention-days: 30
+
+            # ----------------------------------------------------
+            # LOGIN TO GHCR
+            # ----------------------------------------------------
+            - name: Login to GitHub Container Registry
+              if: success()
+              uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            # ----------------------------------------------------
+            # PUSH VALIDATED IMAGE
+            # ----------------------------------------------------
+            - name: Push image to GHCR
+              if: success()
+              run: |
+                  set -euo pipefail
+
+                  IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+                  echo "Pushing ${IMAGE}"
+
+                  docker tag \
+                    "${IMAGE_NAME}:${IMAGE_TAG}" \
+                    "${IMAGE}"
+
+                  docker push "${IMAGE}"
+
+            # ----------------------------------------------------
+            # CLEANUP
+            # ----------------------------------------------------
+            - name: Cleanup
+              if: always()
+              run: |
+                  docker rm -f go-stockbot-test 2>/dev/null || true
